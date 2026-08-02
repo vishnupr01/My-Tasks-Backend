@@ -10,10 +10,21 @@ datasource db {
 model User {
   id        String   @id @default(cuid())
   email     String   @unique
+  username  String   @unique
   password  String
   name      String?
+  isAdmin   Boolean  @default(false)
+  isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
   tasks     Task[]
+
+  sentFriendRequests     FriendRequest[] @relation("SentRequests")
+  receivedFriendRequests FriendRequest[] @relation("ReceivedRequests")
+  sentNotifications      Notification[]  @relation("SentNotifications")
+  receivedNotifications  Notification[]  @relation("ReceivedNotifications")
+  createdInviteCodes     InviteCode[]    @relation("InviteCodeCreatedBy")
+  redeemedInvite         InviteCode?     @relation("InviteCodeUsedBy")
+  decidedAccessRequests  AccessRequest[] @relation("AccessRequestDecidedBy")
 }
 
 model Task {
@@ -32,6 +43,75 @@ model Task {
   parent      Task?      @relation("SubTasks", fields: [parentId], references: [id], onDelete: Cascade)
   subTasks    Task[]     @relation("SubTasks")
 }
+model FriendRequest {
+  id         String              @id @default(cuid())
+  senderId   String
+  receiverId String
+  status     FriendRequestStatus @default(PENDING)
+  createdAt  DateTime            @default(now())
+  updatedAt  DateTime            @updatedAt
+
+  sender   User @relation("SentRequests", fields: [senderId], references: [id], onDelete: Cascade)
+  receiver User @relation("ReceivedRequests", fields: [receiverId], references: [id], onDelete: Cascade)
+
+  @@unique([senderId, receiverId])
+  @@index([receiverId, status])
+}
+
+model Notification {
+  id         String           @id @default(cuid())
+  senderId   String
+  receiverId String
+  type       NotificationType
+  isRead     Boolean          @default(false)
+  createdAt  DateTime         @default(now())
+
+  sender   User @relation("SentNotifications", fields: [senderId], references: [id], onDelete: Cascade)
+  receiver User @relation("ReceivedNotifications", fields: [receiverId], references: [id], onDelete: Cascade)
+
+  @@index([receiverId, createdAt])
+}
+
+model InviteCode {
+  id          String    @id @default(cuid())
+  code        String    @unique
+  createdById String
+  createdBy   User      @relation("InviteCodeCreatedBy", fields: [createdById], references: [id], onDelete: Cascade)
+  usedById    String?   @unique
+  usedBy      User?     @relation("InviteCodeUsedBy", fields: [usedById], references: [id], onDelete: SetNull)
+  createdAt   DateTime  @default(now())
+  usedAt      DateTime?
+}
+
+model AccessRequest {
+  id          String              @id @default(cuid())
+  email       String
+  status      AccessRequestStatus @default(PENDING)
+  createdAt   DateTime            @default(now())
+  decidedAt   DateTime?
+  decidedById String?
+  decidedBy   User?               @relation("AccessRequestDecidedBy", fields: [decidedById], references: [id], onDelete: SetNull)
+
+  @@index([email, createdAt])
+  @@index([status, createdAt])
+}
+
+enum AccessRequestStatus {
+  PENDING
+  APPROVED
+  DECLINED
+}
+
+enum NotificationType {
+  FRIEND_REQUEST
+  FRIEND_ACCEPTED
+}
+
+enum FriendRequestStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+}
 
 enum Priority {
   LOW
@@ -44,3 +124,4 @@ enum Status {
   IN_PROGRESS
   DONE
 }
+
