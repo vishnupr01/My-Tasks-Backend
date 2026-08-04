@@ -25,6 +25,11 @@ model User {
   createdInviteCodes     InviteCode[]    @relation("InviteCodeCreatedBy")
   redeemedInvite         InviteCode?     @relation("InviteCodeUsedBy")
   decidedAccessRequests  AccessRequest[] @relation("AccessRequestDecidedBy")
+
+  createdChannels Channel[]       @relation("ChannelCreatedBy")
+  roles           UserRole[]
+  channelGrants   ChannelAccess[] @relation("ChannelAccessUser")
+  messages        Message[]       @relation("MessageAuthor")
 }
 
 model Task {
@@ -94,6 +99,67 @@ model AccessRequest {
 
   @@index([email, createdAt])
   @@index([status, createdAt])
+}
+
+model Channel {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  description String?
+  isPrivate   Boolean  @default(false)
+  createdById String
+  createdBy   User     @relation("ChannelCreatedBy", fields: [createdById], references: [id], onDelete: Cascade)
+  createdAt   DateTime @default(now())
+
+  access   ChannelAccess[]
+  messages Message[]
+}
+
+model Role {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  createdAt DateTime @default(now())
+
+  users         UserRole[]
+  channelGrants ChannelAccess[]
+}
+
+model UserRole {
+  userId String
+  roleId String
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role   Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+}
+
+// Grants a locked channel's access to exactly one of: a specific user, or a
+// role (everyone holding that role gets in). Enforced by a CHECK constraint
+// in the migration SQL, since Prisma's schema language can't express
+// "exactly one of these two columns must be set."
+model ChannelAccess {
+  id        String   @id @default(cuid())
+  channelId String
+  channel   Channel  @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  userId    String?
+  user      User?    @relation("ChannelAccessUser", fields: [userId], references: [id], onDelete: Cascade)
+  roleId    String?
+  role      Role?    @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([channelId, userId])
+  @@unique([channelId, roleId])
+}
+
+model Message {
+  id        String   @id @default(cuid())
+  content   String
+  channelId String
+  channel   Channel  @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  authorId  String
+  author    User     @relation("MessageAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@index([channelId, createdAt])
 }
 
 enum AccessRequestStatus {
