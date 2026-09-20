@@ -144,6 +144,16 @@ export class AuthService {
     });
   }
 
+  async deleteInviteCode(id: string) {
+    await this.prisma.inviteCode.delete({ where: { id } });
+    return { id };
+  }
+
+  async deleteAllInviteCodes() {
+    const { count } = await this.prisma.inviteCode.deleteMany({});
+    return { count };
+  }
+
   // ── Membership control ───────────────────────────────────────────
 
   async listUsers() {

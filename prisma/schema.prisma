@@ -18,6 +18,11 @@ model User {
   createdAt DateTime @default(now())
   tasks     Task[]
 
+  // Per-user chat notification preferences -- independent of anyone else's,
+  // read/written only via the authenticated "me" endpoints below.
+  notificationsEnabled      Boolean @default(true)
+  notificationSoundEnabled  Boolean @default(true)
+
   sentFriendRequests     FriendRequest[] @relation("SentRequests")
   receivedFriendRequests FriendRequest[] @relation("ReceivedRequests")
   sentNotifications      Notification[]  @relation("SentNotifications")
@@ -27,9 +32,21 @@ model User {
   decidedAccessRequests  AccessRequest[] @relation("AccessRequestDecidedBy")
 
   createdChannels Channel[]       @relation("ChannelCreatedBy")
+  codeEdits       CodeDocument[]  @relation("CodeDocumentUpdatedBy")
   roles           UserRole[]
   channelGrants   ChannelAccess[] @relation("ChannelAccessUser")
   messages        Message[]       @relation("MessageAuthor")
+
+  createdRoadmaps Roadmap[]           @relation("RoadmapCreatedBy")
+  topicProgress   UserTopicProgress[]
+
+  dmConversationsAsA DirectConversation[] @relation("DMUserA")
+  dmConversationsAsB DirectConversation[] @relation("DMUserB")
+  directMessagesSent DirectMessage[]      @relation("DirectMessageSender")
+
+  channelReads   ChannelRead[]
+  dmReadsAsUser  DmRead[] @relation("DmReadUser")
+  dmReadsAsOther DmRead[] @relation("DmReadOther")
 }
 
 model Task {
@@ -110,8 +127,79 @@ model Channel {
   createdBy   User     @relation("ChannelCreatedBy", fields: [createdById], references: [id], onDelete: Cascade)
   createdAt   DateTime @default(now())
 
-  access   ChannelAccess[]
-  messages Message[]
+  // What this channel *is*, not who can see it (that's isPrivate/access).
+  // A CODE channel is an ordinary channel -- same membership, messages,
+  // unread counts -- that additionally owns a shared editor surface. Making
+  // this one column rather than a separate table is deliberate: everything
+  // already built for channels keeps working untouched.
+  kind ChannelKind @default(TEXT)
+
+  access        ChannelAccess[]
+  messages      Message[]
+  reads         ChannelRead[]
+  codeDocuments CodeDocument[]
+}
+
+// The shared editor surface of a CODE channel. One row per file: today a
+// channel always has exactly one ("main"), but keeping documents in their
+// own table (rather than columns on Channel) is what makes multi-file a
+// later feature instead of a later migration.
+//
+// `language` lives here, so it's per room and switchable at any time (and
+// per file once there are several) -- the default only applies to a
+// freshly created room.
+model CodeDocument {
+  id        String  @id @default(cuid())
+  channelId String
+  channel   Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  path     String @default("main")
+  language String @default("javascript")
+
+  // Two representations of the same document, kept in step by the server:
+  //
+  // `ystate` is the real one -- the CRDT's own binary encoding, holding the
+  // edit history needed to merge concurrent changes. Only Yjs can read it.
+  //
+  // `content` is a plain-text mirror written whenever ystate is saved. It
+  // exists so anything that just needs "the code as text" -- the read-only
+  // mobile view, later the code runner -- can read one column instead of
+  // loading a CRDT. Never write to it directly; it's derived.
+  ystate  Bytes?
+  content String @default("")
+
+  updatedAt   DateTime @updatedAt
+  updatedById String?
+  updatedBy   User?    @relation("CodeDocumentUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
+
+  @@unique([channelId, path])
+}
+
+// Per-user "I've seen everything up to here" marker for a channel. No row
+// yet means the user has never opened it -- unread count then falls back to
+// every message in the channel not authored by them (see NotificationsService).
+model ChannelRead {
+  userId     String
+  channelId  String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  channel    Channel  @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  lastReadAt DateTime @default(now())
+
+  @@id([userId, channelId])
+}
+
+// Same idea as ChannelRead, but for direct messages -- keyed by the other
+// person (not a conversationId) since that's what the frontend already
+// routes on (/friends/:userId), and the conversation may not exist yet the
+// first time two friends open each other's DM page.
+model DmRead {
+  userId      String
+  otherUserId String
+  user        User     @relation("DmReadUser", fields: [userId], references: [id], onDelete: Cascade)
+  other       User     @relation("DmReadOther", fields: [otherUserId], references: [id], onDelete: Cascade)
+  lastReadAt  DateTime @default(now())
+
+  @@id([userId, otherUserId])
 }
 
 model Role {
@@ -151,15 +239,122 @@ model ChannelAccess {
 }
 
 model Message {
-  id        String   @id @default(cuid())
-  content   String
-  channelId String
-  channel   Channel  @relation(fields: [channelId], references: [id], onDelete: Cascade)
-  authorId  String
-  author    User     @relation("MessageAuthor", fields: [authorId], references: [id], onDelete: Cascade)
-  createdAt DateTime @default(now())
+  id             String   @id @default(cuid())
+  content        String?
+  // Attachment lives on Cloudinary -- attachmentUrl is the full delivery URL,
+  // attachmentType is a coarse bucket ("image" | "video" | "audio" | "file")
+  // used to pick how the frontend renders it, attachmentName is the original
+  // filename (shown for non-previewable attachments). A message has either
+  // content, an attachment, or both -- never neither (enforced in the service).
+  attachmentUrl      String?
+  attachmentType     String?
+  attachmentName     String?
+  // Seconds, captured from our own recording timer at send time -- browsers
+  // (Chrome in particular) frequently report Infinity for the duration of a
+  // MediaRecorder-produced audio file until forced to scan the whole thing,
+  // which isn't reliable across CDNs/browsers. Knowing the real duration
+  // upfront sidesteps that entirely for voice notes.
+  attachmentDuration Int?
+  channelId      String
+  channel        Channel  @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  authorId       String
+  author         User     @relation("MessageAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+  createdAt      DateTime @default(now())
 
   @@index([channelId, createdAt])
+}
+
+// Admin-authored, dynamic: any tech stack/topic (MERN, ML, "Backend", ...).
+model Roadmap {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  description String?
+  createdById String
+  createdBy   User     @relation("RoadmapCreatedBy", fields: [createdById], references: [id], onDelete: Cascade)
+  createdAt   DateTime @default(now())
+
+  categories RoadmapCategory[]
+}
+
+// Subcategory under a roadmap, e.g. "React", "TypeScript" under a MERN roadmap.
+model RoadmapCategory {
+  id        String   @id @default(cuid())
+  roadmapId String
+  roadmap   Roadmap  @relation(fields: [roadmapId], references: [id], onDelete: Cascade)
+  name      String
+  order     Int      @default(0)
+  createdAt DateTime @default(now())
+
+  topics InterviewTopic[]
+
+  @@unique([roadmapId, name])
+}
+
+// A single interview-prep checklist item under a category, e.g. "useEffect cleanup".
+model InterviewTopic {
+  id          String   @id @default(cuid())
+  categoryId  String
+  category    RoadmapCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  title       String
+  description String?
+  order       Int      @default(0)
+  createdAt   DateTime @default(now())
+
+  progress UserTopicProgress[]
+
+  @@unique([categoryId, title])
+}
+
+// Per-user state for a topic: the todo checkbox, plus a separate "revisit" count
+// that drives the memory-strength bar -- distinct from completion, since you
+// keep revisiting something you've already marked done to reinforce it.
+model UserTopicProgress {
+  id              String    @id @default(cuid())
+  userId          String
+  user            User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  topicId         String
+  topic           InterviewTopic  @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  completed       Boolean   @default(false)
+  revisitCount    Int       @default(0)
+  lastRevisitedAt DateTime?
+  updatedAt       DateTime  @updatedAt
+
+  @@unique([userId, topicId])
+}
+
+// Deliberately separate from Channel/Message: access here is just "are these
+// two people friends" (checked in the service), nothing to do with the
+// admin-granted/role-based access model channels use. userA/userB are
+// canonicalized (lexicographically sorted ids) so the pair is found the same
+// way regardless of who initiated -- enforced by the service, backstopped by
+// the unique constraint below.
+model DirectConversation {
+  id        String   @id @default(cuid())
+  userAId   String
+  userBId   String
+  userA     User     @relation("DMUserA", fields: [userAId], references: [id], onDelete: Cascade)
+  userB     User     @relation("DMUserB", fields: [userBId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  messages DirectMessage[]
+
+  @@unique([userAId, userBId])
+}
+
+model DirectMessage {
+  id             String             @id @default(cuid())
+  conversationId String
+  conversation   DirectConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  senderId       String
+  sender         User               @relation("DirectMessageSender", fields: [senderId], references: [id], onDelete: Cascade)
+  content            String?
+  attachmentUrl      String?
+  attachmentType     String?
+  attachmentName     String?
+  attachmentDuration Int?
+  createdAt          DateTime           @default(now())
+
+  @@index([conversationId, createdAt])
 }
 
 enum AccessRequestStatus {
@@ -171,6 +366,11 @@ enum AccessRequestStatus {
 enum NotificationType {
   FRIEND_REQUEST
   FRIEND_ACCEPTED
+}
+
+enum ChannelKind {
+  TEXT
+  CODE
 }
 
 enum FriendRequestStatus {

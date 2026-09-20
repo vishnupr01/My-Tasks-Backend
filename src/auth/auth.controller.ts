@@ -1,4 +1,4 @@
-import { Controller, Post, Get, Patch, Body, Param, Query, UseGuards, HttpCode, HttpStatus } from '@nestjs/common';
+import { Controller, Post, Get, Patch, Delete, Body, Param, Query, UseGuards, HttpCode, HttpStatus } from '@nestjs/common';
 import { AuthService } from './auth.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
@@ -63,6 +63,18 @@ export class AuthController {
   @UseGuards(JwtAuthGuard, AdminGuard)
   listInviteCodes() {
     return this.authService.listInviteCodes();
+  }
+
+  @Delete('invite-codes')
+  @UseGuards(JwtAuthGuard, AdminGuard)
+  deleteAllInviteCodes() {
+    return this.authService.deleteAllInviteCodes();
+  }
+
+  @Delete('invite-codes/:id')
+  @UseGuards(JwtAuthGuard, AdminGuard)
+  deleteInviteCode(@Param('id') id: string) {
+    return this.authService.deleteInviteCode(id);
   }
 
   // ── Membership control ───────────────────────────────────────
